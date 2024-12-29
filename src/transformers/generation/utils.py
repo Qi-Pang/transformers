@@ -24,6 +24,8 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+from collections import Counter
+
 from ..integrations.deepspeed import is_deepspeed_zero3_enabled
 from ..modeling_outputs import CausalLMOutputWithPast, Seq2SeqLMOutput
 from ..models.auto import (
@@ -2740,8 +2742,36 @@ class GenerationMixin:
             next_token_logits = outputs.logits[:, -1, :]
 
             # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
-            next_token_scores = logits_warper(input_ids, next_token_scores)
+            # next_token_scores = logits_processor(input_ids, next_token_logits)
+            # next_token_scores = logits_warper(input_ids, next_token_scores)
+
+            next_token_scores_list = logits_processor(input_ids, next_token_logits)
+
+
+            # FIXME: watermark multiple keys
+            if isinstance(next_token_scores_list, list):
+                freq_tokens = []
+                freq_tokens_counter = []
+                for i in range(len(next_token_scores_list)):
+                    next_token_scores_list[i] = logits_warper(input_ids, next_token_scores_list[i])
+                    probs = nn.functional.softmax(next_token_scores_list[i], dim=-1)
+                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+                    freq_tokens.append(next_tokens)
+                    freq_tokens_counter.append(next_tokens.item())
+                frequencies = Counter(freq_tokens_counter)
+                # Output the frequencies for each index
+                result_freq = [frequencies[item] for item in freq_tokens_counter]
+                # print(result_freq)
+                max_freq = max(result_freq)
+                select_key = result_freq.index(max_freq)
+                next_tokens = freq_tokens[select_key]
+
+                next_token_scores = next_token_scores_list[select_key]
+            else:
+                next_token_scores = logits_warper(input_ids, next_token_scores_list)
+                # sample
+                probs = nn.functional.softmax(next_token_scores, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
